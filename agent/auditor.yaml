@@ -1,0 +1,73 @@
+agent:
+  name: AuditorAgent
+  description: Guardrail agent that reviews user inputs & AI outputs
+  tools: [http, gemini]
+
+inputs:
+  - name: doc
+    type: string
+  - name: mode   
+    type: string
+
+outputs:
+  - name: clean_doc
+    type: string
+  - name: verdict
+    type: string
+
+variables:
+  AUDIT_URL: "http://localhost:8000/audit"
+
+steps:
+  
+  - id: audit
+    run:
+      tool: http.post
+      args:
+        url: $AUDIT_URL
+        json: { doc: $input.doc, mode: $input.mode }
+    save_as: audit_result
+
+  
+  - id: block_user_input
+    if: ${$input.mode == "input" && audit_result.risk_score >= 50}
+    run:
+      assign:
+        clean_doc: ""
+        verdict: "❌ Input violates safe AI terms"
+
+  
+  - id: retry_output_1
+    if: ${$input.mode == "output" && audit_result.risk_score >= 50}
+    run:
+      tool: gemini.redo
+      args:
+        text: $input.doc
+        instructions: "Rephrase safely. Remove PII, reduce toxicity/bias, and avoid unverifiable claims."
+    save_as: redo_text_1
+
+  - id: retry_output_2
+    if: ${redo_text_1 && audit_result.risk_score >= 50}
+    run:
+      tool: gemini.redo
+      args:
+        text: $redo_text_1
+        instructions: "Rephrase more strictly with safety filters applied."
+    save_as: redo_text_2
+
+  - id: retry_output_3
+    if: ${redo_text_2 && audit_result.risk_score >= 50}
+    run:
+      tool: gemini.redo
+      args:
+        text: $redo_text_2
+        instructions: "Final attempt: only return factual, non-toxic, PII-free content."
+    save_as: redo_text_3
+
+  
+  - id: output
+    run:
+      assign:
+        clean_doc: ${redo_text_3 ?? redo_text_2 ?? redo_text_1 ?? $input.doc}
+        verdict: "${audit_result.risk_score >= 50 && !$redo_text_3 ? '❌ Output unsafe after 3 retries' : '✅ Safe'}"
+
